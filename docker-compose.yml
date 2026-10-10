@@ -1,0 +1,57 @@
+# Loki + Alloy + Grafana для логов запросов Traefik в Dokploy.
+# Деплой: Dokploy → Create Service → Compose (Docker Compose), источник — git-репо с этой папкой.
+# Переменные (Environment в Dokploy): GRAFANA_HOST, GRAFANA_ADMIN_PASSWORD.
+# Домен для Grafana добавляется во вкладке Domains: service=grafana, port=3000, HTTPS.
+# Loki и Alloy наружу не торчат — портов нет.
+
+services:
+  loki:
+    image: grafana/loki:3.7.8
+    command: -config.file=/etc/loki/loki.yaml
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.20.1
+    command:
+      - run
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    environment:
+      # Запросы к самой Grafana выкидываем, иначе автообновление дашборда засоряет логи
+      GRAFANA_HOST: ${GRAFANA_HOST:?GRAFANA_HOST is required}
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Монтируем папку, а не файл: Dokploy при очистке делает mv access.log.tmp access.log,
+      # и bind-mount отдельного файла остался бы смотреть на старый inode
+      - /etc/dokploy/traefik/dynamic:/var/log/traefik:ro
+      # Позиции чтения — чтобы после рестарта не перечитывать файл с начала
+      - alloy-data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    environment:
+      GF_SERVER_ROOT_URL: https://${GRAFANA_HOST}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+volumes:
+  loki-data:
+  alloy-data:
+  grafana-data:

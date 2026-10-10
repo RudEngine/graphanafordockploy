@@ -1,0 +1,65 @@
+// Читает access.log Traefik (Dokploy пишет его в JSON при включённых Requests)
+// и отправляет в Loki.
+//
+// Лейблы (индексируются): job, host, status.
+// Всё остальное (путь, IP, метод, длительность, User-Agent) остаётся в JSON-строке
+// и достаётся в Grafana через `| json` — так не раздуваем кардинальность.
+
+local.file_match "traefik_access" {
+	path_targets = [{
+		"__path__" = "/var/log/traefik/access.log",
+		"job"      = "traefik",
+	}]
+	sync_period = "10s"
+}
+
+loki.source.file "traefik_access" {
+	targets    = local.file_match.traefik_access.targets
+	forward_to = [loki.process.traefik.receiver]
+}
+
+loki.process "traefik" {
+	forward_to = [loki.write.default.receiver]
+
+	stage.json {
+		expressions = {
+			ts     = "StartUTC",
+			host   = "RequestHost",
+			router = "RouterName",
+			status = "DownstreamStatus",
+		}
+	}
+
+	// Время запроса берём из самого лога, а не из момента чтения.
+	// Заодно это даёт дедупликацию в Loki, когда Dokploy обрезает файл и Alloy перечитывает хвост.
+	stage.timestamp {
+		source = "ts"
+		format = "RFC3339Nano"
+	}
+
+	// Сканеры шлют мусор в Host. Если запрос не попал ни в один роутер — не плодим лейблы,
+	// кладём всё в host="unrouted" (оригинальный Host остаётся в строке лога).
+	stage.template {
+		source   = "host"
+		template = "{{ if .router }}{{ ToLower .host }}{{ else }}unrouted{{ end }}"
+	}
+
+	stage.drop {
+		source              = "host"
+		value               = sys.env("GRAFANA_HOST")
+		drop_counter_reason = "grafana_self"
+	}
+
+	stage.labels {
+		values = {
+			host   = "",
+			status = "",
+		}
+	}
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}
