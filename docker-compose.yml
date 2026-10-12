@@ -1,8 +1,8 @@
-# Loki + Alloy + Grafana для логов запросов Traefik в Dokploy.
+# Loki + Prometheus + Alloy + Grafana: логи запросов Traefik и CPU/RAM контейнеров в Dokploy.
 # Деплой: Dokploy → Create Service → Compose (Docker Compose), источник — git-репо с этой папкой.
 # Переменные (Environment в Dokploy): GRAFANA_HOST, GRAFANA_ADMIN_PASSWORD.
 # Домен для Grafana добавляется во вкладке Domains: service=grafana, port=3000, HTTPS.
-# Loki и Alloy наружу не торчат — портов нет.
+# Loki, Prometheus и Alloy наружу не торчат — портов нет.
 
 services:
   loki:
@@ -11,6 +11,18 @@ services:
     volumes:
       - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
       - loki-data:/loki
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      # Метрики сам не собирает — их пушит Alloy
+      - --web.enable-remote-write-receiver
+    volumes:
+      - prometheus-data:/prometheus
     restart: unless-stopped
 
   alloy:
@@ -29,8 +41,20 @@ services:
       - /etc/dokploy/traefik/dynamic:/var/log/traefik:ro
       # Позиции чтения — чтобы после рестарта не перечитывать файл с начала
       - alloy-data:/var/lib/alloy/data
+      # Для cAdvisor (CPU/RAM контейнеров): список контейнеров из Docker API, цифры из cgroup хоста
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      # Docker 29+ с хранилищем образов containerd (storage=overlayfs): без сокета containerd
+      # cAdvisor не регистрирует docker-фабрику и видит только хост. Папка, а не файл — переживёт рестарт containerd
+      - /run/containerd:/run/containerd:ro
+    # Видеть cgroup и процессы всех контейнеров хоста, а не только свои
+    # (сетевые счётчики cAdvisor читает из /proc/<pid>/net/dev процессов контейнера)
+    cgroup: host
+    pid: host
     depends_on:
       - loki
+      - prometheus
     restart: unless-stopped
 
   grafana:
@@ -43,15 +67,27 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Чистим меню: только наши дашборды и Explore
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/home.json
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_DISABLE_PLUGINS: grafana-metricsdrilldown-app,grafana-exploretraces-app,grafana-lokiexplore-app,grafana-pyroscope-app,grafana-advisor-app
+      GF_UNIFIED_ALERTING_ENABLED: "false"
+      GF_SNAPSHOTS_ENABLED: "false"
+      GF_PUBLIC_DASHBOARDS_ENABLED: "false"
+      GF_HELP_ENABLED: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./grafana/home.json:/etc/grafana/home.json:ro
     depends_on:
       - loki
+      - prometheus
     restart: unless-stopped
 
 volumes:
   loki-data:
+  prometheus-data:
   alloy-data:
   grafana-data:
